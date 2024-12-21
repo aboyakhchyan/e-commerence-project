@@ -2,8 +2,9 @@ const express = require('express')
 const fs = require('node:fs')
 const path = require('node:path')
 const app = express()
+require('dotenv').config()
 
-const PORT = 3001
+const PORT = process.env.PORT
 const usersFilePath = path.resolve(__dirname, 'users.json')
 const productsFilePath = path.resolve(__dirname, 'products.json')
 const ordersFilePath = path.resolve(__dirname, 'orders.json')
@@ -47,33 +48,99 @@ const totalCountGenerator = (orderProducts, products) => {
     return totalCount
 }
 
-app.use(express.json())
-app.post('/users/register', (req, res) => {
-    const users = JSON.parse(getData(usersFilePath, 'utf-8'))
+const validationData = (req, res, next) => {
     const body = req.body
+    const {name, email, password, is_admin} = body
 
-    if(!body.is_admin) body.is_admin = false
-
-    if(!body.name?.trim() || !body.password?.trim() ||  !body.email?.trim()) {
-        res.status(404).send('All fields must be filled in')
+    if(!name?.trim() || !password?.trim() ||  !email?.trim()) {
+        return res.status(404).json({message: 'All fields must be filled in'})
     }
 
-    if(body.name.length < 3) {
-        res.status(404).send('The name must have at least three letters')
+    if(name.length < 3) {
+        return res.status(404).json({message: 'The name must have at least three letters'})
     }
 
-    if(body.password.length < 6) {
-        res.status(404).send('The name must have at least six letters')
+    if(password.length < 6) {
+        return res.status(404).json({message: 'The name must have at least six letters'})
     }
 
-    if(JSON.parse(getData(usersFilePath)).some(user => user.email == body.email)) {
-        res.status(404).send('The email address must be unique')
+    if(JSON.parse(getData(usersFilePath)).some(user => user.email == email)) {
+        return res.status(404).json({message: 'The email address must be unique'})
     }
 
-    const user = {
-        ...body,
-        id: Date.now()
+    req.body = {name, email, is_admin}
+    next()
+}
+
+const restrictAccess = (req, res, next) => {
+    const users = JSON.parse(getData(usersFilePath, 'utf-8'))
+    const product = req.body
+    const {name} = product
+
+    for(let i = 0; i < users.length; ++i) {
+        const user = users[i]
+        if(name == user.name && user.is_admin == true) {
+            next()
+        } 
     }
+
+    res.status(404).json({message: 'Access is restricted to admins only'})
+}
+
+const logRequests = (req, res, next) => {
+    const timestamp = new Date().toISOString()
+    console.log(`[${timestamp}], method: ${req.method}, URL: ${req.url}`)
+    next()
+}
+
+const InputSanitizationUser = (req, res, next) => {
+    const user = req.body
+    let {name, email, password, is_admin = false} = user
+
+    req.body = {name: name.trim(), email: email.toLowerCase().trim(), password: password.trim(), is_admin}
+    next()
+
+}
+
+const middlware1 = (req, res, next) => {
+    const order = req.body
+    const properties = Object.keys(order)
+    let check = false
+
+    for(const key of properties) {
+        if(key === 'user_id') {
+            check = true
+        }
+    }
+
+    if(!check) {
+        return res.status(404).json({message: 'The order does not have a user ID'})
+    }
+    
+    next()
+}
+
+const middlware2 = (req, res, next) => {
+    const users = JSON.parse(getData(usersFilePath, 'utf-8'))
+    const order = req.body
+
+    const result = users.some(user => user.id == order.user_id)
+
+    if(!result) {
+        return res.status(404).json({message: "User not a found"})
+    }
+
+    next()
+}
+
+app.use(express.json())
+app.use(logRequests)
+app.post('/users/register', InputSanitizationUser, validationData, (req, res) => {
+    const users = JSON.parse(getData(usersFilePath, 'utf-8'))
+
+    let user = req.body
+
+    user = {...user, id: Date.now()}
 
     users.push(user)
     setData(usersFilePath, users)
@@ -90,23 +157,23 @@ app.post('/users/login', (req, res) => {
     }
 
     if(users.some(elm => areEqual(elm, body))){
-        res.status(200).send({message: 'login is succesful'})
+        return res.status(200).json({message: 'login is succesful'})
     }
 
     res.status(404).send({message: "user not found"})
 })
 
-app.post('/products', (req, res) => {
+app.post('/products', restrictAccess, (req, res) => {
     const products = JSON.parse(getData(productsFilePath, 'utf-8'))
     const body = req.body
     const {name, description, price, category, image_url, is_active} = body
 
     if(!name.trim() || !description.trim() || !category.trim() || !image_url.trim()) {
-        res.status(404).send({message: 'All fields must be filled in'})
+        return res.status(404).json({message: 'All fields must be filled in'})
     }
 
     if(price <= 0) {
-        res.status(400).send({message: 'price must be greater than zero'})
+        return res.status(400).json({message: 'price must be greater than zero'})
     }
 
     const product = {
@@ -126,14 +193,14 @@ app.get('/products', (req, res) => {
     res.status(200).send(products)
 })
 
-app.post('/orders', (req, res) => {
+app.post('/orders', middlware1, middlware2, (req, res) => {
     const body = req.body
     const orders = JSON.parse(getData(ordersFilePath, 'utf-8'))
     const products = JSON.parse(getData(productsFilePath, 'utf-8'))
 
 
     if(body.products.length <= 0) {
-        res.status(404).send({message: 'Products do not have a valid quantity'})
+        return res.status(404).json({message: 'Products do not have a valid quantity'})
     }
 
     const total_count = totalCountGenerator(body.products, products)
